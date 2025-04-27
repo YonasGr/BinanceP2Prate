@@ -1,6 +1,6 @@
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, InlineQueryHandler
 
 BOT_TOKEN = '7640687485:AAEh8tI6GhuJ9_MgYsjUIcCLQG-ILD9I3_Q'
 
@@ -81,11 +81,51 @@ def fetch_p2p_price(trade_type, amount):
     
     return '\n'.join(offers_found)
 
+# Inline query handler
+async def inline_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query  # This gets the text the user typed
+    if not query:  # If no query, just return an empty list
+        return
+
+    try:
+        amount = float(query)
+    except ValueError:
+        await update.inline_query.answer([], switch_pm_text="Please type a valid amount.", switch_pm_parameter="start")
+        return
+
+    buy_info = fetch_p2p_price(trade_type="BUY", amount=amount)
+    sell_info = fetch_p2p_price(trade_type="SELL", amount=amount)
+
+    if buy_info == "No offer found for your amount." and sell_info == "No offer found for your amount.":
+        results = [
+            InlineQueryResultArticle(
+                id='1',
+                title="No results",
+                input_message_content=InputTextMessageContent("Sorry, no offers found for this amount."),
+            )
+        ]
+    else:
+        results = [
+            InlineQueryResultArticle(
+                id='1',
+                title="P2P Price",
+                input_message_content=InputTextMessageContent(
+                    f"💵 *Binance P2P (ETB)* for *{amount} ETB*:\n\n"
+                    f"🔵 *Buy* Price: `{buy_info}`\n"
+                    f"🟠 *Sell* Price: `{sell_info}`\n"
+                ),
+            )
+        ]
+
+    await update.inline_query.answer(results)
+
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Add handlers for /start, /price, and inline queries
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('price', get_price))
+    app.add_handler(InlineQueryHandler(inline_price))
 
     print("Bot is running...")
     app.run_polling()
