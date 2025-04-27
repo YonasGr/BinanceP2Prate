@@ -1,176 +1,261 @@
-import requests
-from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, InlineQueryHandler
+import asyncio
+from datetime import datetime
+from typing import Optional, Dict, List
+import sqlite3
+import aiohttp
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters
+)
 
 BOT_TOKEN = '7640687485:AAEh8tI6GhuJ9_MgYsjUIcCLQG-ILD9I3_Q'
-ADMIN_USER_ID = 898505692  # Replace this with your actual Telegram user ID
+ADMIN_IDS = [898505692 ]  # Replace with your Telegram user ID
+DATABASE_NAME = 'bot_users.db'
 
-# Store user IDs who have started the bot
-user_ids = set()
+# Initialize database
+def init_db():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            last_interaction TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+async def track_user(update: Update):
+    user = update.effective_user
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO users 
+        (user_id, username, first_name, last_name, last_interaction) 
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user.id, user.username, user.first_name, user.last_name, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_ids.add(update.message.from_user.id)  # Add the user to the list of users
-    introduction_text = """
-    👋 *Welcome to the Binance P2P Price Bot!*
-
-    My name is *Yonas*, and I created this bot to provide real-time P2P price updates for Binance in Ethiopian Birr (ETB).
-
-    🔹 You can use the following commands:
-    - `/price [amount]`: Get the latest buy and sell price for the specified amount in ETB.
-    
-    This bot is designed to help you find the best offers on Binance P2P, whether you are buying or selling cryptocurrency.
-
-    📊 I use the Binance API to fetch real-time offers and show you the best rates within your specified limits.
-
-    If you have any questions or need further assistance, feel free to reach out!
-
-    Let's get started! 👇
-    contact me here:- @Yoniprof
-    """
-
-    await update.message.reply_text(introduction_text, parse_mode='Markdown')
+    await track_user(update)
+    await update.message.reply_text(
+        "👋 Welcome!\nUse:\n\n"
+        "/price [amount] [coin] [payment_method]\n"
+        "Example:\n"
+        "`/price 5000 USDT`\n"
+        "`/price 10000 BTC Telebirr`\n",
+        parse_mode='Markdown'
+    )
 
 async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 1:
-        await update.message.reply_text("⚠️ Please provide the amount.\nExample: `/price 5000`", parse_mode='Markdown')
+    await track_user(update)
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text("⚠️ Usage: `/price [amount] [coin] [payment_method]`", parse_mode='Markdown')
+        return
+    
+    try:
+        amount = float(args[0])
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+    except ValueError as e:
+        await update.message.reply_text(f"⚠️ Invalid amount! {str(e)}", parse_mode='Markdown')
+        return
+    
+    coin = args[1].upper() if len(args) > 1 else "USDT"
+    pay_type = args[2] if len(args) > 2 else None
+
+    try:
+        buy_info = await fetch_p2p_price(trade_type="BUY", amount=amount, asset=coin, pay_type=pay_type)
+        sell_info = await fetch_p2p_price(trade_type="SELL", amount=amount, asset=coin, pay_type=pay_type)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error fetching prices: {str(e)}", parse_mode='Markdown')
+        return
+
+    response = f"💵 *{coin} Binance P2P (ETB)* for *{amount} ETB*\n\n"
+    response += f"🔵 *Buy*: `{buy_info}`\n"
+    response += f"🟠 *Sell*: `{sell_info}`\n\n"
+    response += "🔔 Powered by @YourUsername"
+
+    keyboard = [
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh|{amount}|{coin}|{pay_type or 'none'}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(response, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await track_user(update)
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data.split('|')
+    if len(data) != 4:
+        await query.edit_message_text("⚠️ Invalid refresh request")
         return
 
     try:
-        amount = float(context.args[0])
-    except ValueError:
-        await update.message.reply_text("⚠️ Invalid amount. Example: `/price 5000`", parse_mode='Markdown')
-        return
+        amount = float(data[1])
+        coin = data[2]
+        pay_type = data[3] if data[3] != 'none' else None
 
-    buy_info = fetch_p2p_price(trade_type="BUY", amount=amount)
-    sell_info = fetch_p2p_price(trade_type="SELL", amount=amount)
+        buy_info = await fetch_p2p_price(trade_type="BUY", amount=amount, asset=coin, pay_type=pay_type)
+        sell_info = await fetch_p2p_price(trade_type="SELL", amount=amount, asset=coin, pay_type=pay_type)
 
-    response = f"💵 *Binance P2P (ETB)* for *{amount} ETB*:\n\n"
-    response += f"🔵 *Buy* Price: `{buy_info}`\n"
-    response += f"🟠 *Sell* Price: `{sell_info}`\n"
+        response = f"💵 *{coin} Binance P2P (ETB)* for *{amount} ETB*\n\n"
+        response += f"🔵 *Buy*: `{buy_info}`\n"
+        response += f"🟠 *Sell*: `{sell_info}`\n\n"
+        response += f"🕰 Updated at {datetime.now().strftime('%H:%M:%S')}\n\n"
+        response += "🔔 Powered by @YourUsername"
 
-    await update.message.reply_text(response, parse_mode='Markdown')
+        await query.edit_message_text(response, parse_mode='Markdown', reply_markup=query.message.reply_markup)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Error refreshing data: {str(e)}")
 
-def fetch_p2p_price(trade_type, amount):
+async def fetch_p2p_price(trade_type: str, amount: float, asset: str = "USDT", pay_type: Optional[str] = None) -> str:
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     payload = {
         "page": 1,
-        "rows": 20,  # Increase to fetch more offers
-        "payTypes": [],
-        "asset": "USDT",
+        "rows": 10,
+        "payTypes": [pay_type] if pay_type else [],
+        "asset": asset,
         "fiat": "ETB",
         "tradeType": trade_type
     }
     headers = {'Content-Type': 'application/json'}
 
-    response = requests.post(url, json=payload, headers=headers)
-    data = response.json()
-
-    # Debugging - Print the raw response from Binance
-    print("Binance API Response:", data)
-
-    offers_found = []
-    
-    for offer in data['data']:
-        min_limit = float(offer['adv']['minSingleTransAmount'])
-        max_limit = float(offer['adv']['maxSingleTransAmount'])
-
-        # Debugging - Check the limits for each offer
-        print(f"Offer Limits: {min_limit} <= {amount} <= {max_limit}")
-
-        if min_limit <= amount <= max_limit:
-            price = offer['adv']['price']
-            offers_found.append(f"{price} ETB (Limits: {min_limit} - {max_limit})")
-
-    if not offers_found:
-        return "No offer found for your amount."
-    
-    return '\n'.join(offers_found)
-
-# Inline query handler
-async def inline_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query  # This gets the text the user typed
-    if not query:  # If no query, just return an empty list
-        return
-
     try:
-        amount = float(query)
-    except ValueError:
-        await update.inline_query.answer([], switch_pm_text="Please type a valid amount.", switch_pm_parameter="start")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=5) as response:
+                data = await response.json()
+                
+                for offer in data.get('data', []):
+                    try:
+                        adv = offer.get('adv', {})
+                        min_limit = float(adv.get('minSingleTransAmount', 0))
+                        max_limit = float(adv.get('maxSingleTransAmount', float('inf')))
+                        if min_limit <= amount <= max_limit:
+                            price = adv.get('price', 'N/A')
+                            return f"{price} ETB (Limits: {min_limit} - {max_limit})"
+                    except (ValueError, AttributeError):
+                        continue
+                
+                return "❌ No matching offers found within your amount range."
+    except asyncio.TimeoutError:
+        return "⚠️ Request timeout. Please try again later."
+    except Exception as e:
+        return f"⚠️ Error: {str(e)}"
+
+# Admin commands
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⚠️ You are not authorized to use this command.")
         return
 
-    buy_info = fetch_p2p_price(trade_type="BUY", amount=amount)
-    sell_info = fetch_p2p_price(trade_type="SELL", amount=amount)
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    # Get total users
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    
+    # Get active users (last 30 days)
+    cursor.execute("SELECT COUNT(*) FROM users WHERE last_interaction > datetime('now', '-30 days')")
+    active_users = cursor.fetchone()[0]
+    
+    conn.close()
 
-    if buy_info == "No offer found for your amount." and sell_info == "No offer found for your amount.":
-        results = [
-            InlineQueryResultArticle(
-                id='1',
-                title="No results",
-                input_message_content=InputTextMessageContent("Sorry, no offers found for this amount."),
-            )
-        ]
-    else:
-        results = [
-            InlineQueryResultArticle(
-                id='1',
-                title="P2P Price",
-                input_message_content=InputTextMessageContent(
-                    f"💵 *Binance P2P (ETB)* for *{amount} ETB*:\n\n"
-                    f"🔵 *Buy* Price: `{buy_info}`\n"
-                    f"🟠 *Sell* Price: `{sell_info}`\n"
-                ),
-            )
-        ]
+    await update.message.reply_text(
+        f"📊 Bot Statistics:\n\n"
+        f"👥 Total users: {total_users}\n"
+        f"🟢 Active users (last 30 days): {active_users}\n\n"
+        f"Admin commands:\n"
+        f"/stats - Show bot statistics\n"
+        f"/broadcast - Send message to all users\n"
+        f"/export_users - Export user data as CSV"
+    )
 
-    await update.inline_query.answer(results)
-
-# Admin panel command
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if the user is the admin
-    if update.message.from_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ You are not authorized to access the admin panel.")
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⚠️ You are not authorized to use this command.")
         return
 
-    # Generate stats and admin options
-    stats_text = f"📊 *Bot Stats:*\n"
-    stats_text += f"Total users who have interacted with the bot: {len(user_ids)}\n"
-
-    admin_text = """
-    🛠 *Admin Panel*:
-    - `/stats`: View bot statistics
-    - `/send_message [message]`: Send a message to all users
-    """
-
-    await update.message.reply_text(stats_text + admin_text, parse_mode='Markdown')
-
-# Send a message to all users
-async def send_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ You are not authorized to send messages to all users.")
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /broadcast <your message>")
         return
 
-    if len(context.args) < 1:
-        await update.message.reply_text("⚠️ Please provide the message to send.\nExample: `/send_message Hello, this is an update!`")
-        return
+    message = " ".join(context.args)
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+    conn.close()
 
-    message = ' '.join(context.args)
-    for user_id in user_ids:
+    total = len(users)
+    success = 0
+    failed = 0
+
+    await update.message.reply_text(f"📢 Starting broadcast to {total} users...")
+
+    for user in users:
         try:
-            await context.bot.send_message(user_id, message)
+            await context.bot.send_message(chat_id=user[0], text=message)
+            success += 1
         except Exception as e:
-            print(f"Failed to send message to {user_id}: {e}")
+            print(f"Failed to send to {user[0]}: {str(e)}")
+            failed += 1
+        await asyncio.sleep(0.1)  # Rate limiting
 
-    await update.message.reply_text(f"✅ Message sent to {len(user_ids)} users.")
+    await update.message.reply_text(
+        f"📢 Broadcast completed:\n"
+        f"✅ Success: {success}\n"
+        f"❌ Failed: {failed}"
+    )
+
+async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⚠️ You are not authorized to use this command.")
+        return
+
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users")
+    users = cursor.fetchall()
+    conn.close()
+
+    csv_data = "user_id,username,first_name,last_name,last_interaction\n"
+    for user in users:
+        csv_data += f"{user[0]},{user[1] or ''},{user[2] or ''},{user[3] or ''},{user[4]}\n"
+
+    await update.message.reply_document(
+        document=bytes(csv_data, 'utf-8'),
+        filename="bot_users.csv",
+        caption="📊 User data export"
+    )
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Add handlers for /start, /price, /admin, /send_message, and inline queries
+    # User commands
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('price', get_price))
-    app.add_handler(CommandHandler('admin', admin))
-    app.add_handler(CommandHandler('send_message', send_message))
-    app.add_handler(InlineQueryHandler(inline_price))
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    # Admin commands
+    app.add_handler(CommandHandler('stats', admin_stats))
+    app.add_handler(CommandHandler('broadcast', broadcast))
+    app.add_handler(CommandHandler('export_users', export_users))
 
     print("Bot is running...")
     app.run_polling()
