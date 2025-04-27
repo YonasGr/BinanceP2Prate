@@ -5,9 +5,24 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 BOT_TOKEN = '7640687485:AAEh8tI6GhuJ9_MgYsjUIcCLQG-ILD9I3_Q'
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welcome!\n\nUse:\n/price [amount]\nExample: `/price 5000`\n\nThis will show P2P Buy/Sell rates in ETB for your limit.", parse_mode='Markdown'
-    )
+    introduction_text = """
+    👋 *Welcome to the Binance P2P Price Bot!*
+
+    My name is *Yonas*, and I created this bot to provide real-time P2P price updates for Binance in Ethiopian Birr (ETB).
+
+    🔹 You can use the following commands:
+    - `/price [amount]`: Get the latest buy and sell price for the specified amount in ETB.
+    
+    This bot is designed to help you find the best offers on Binance P2P, whether you are buying or selling cryptocurrency.
+
+    📊 I use the Binance API to fetch real-time offers and show you the best rates within your specified limits.
+
+    If you have any questions or need further assistance, feel free to reach out!
+
+    Let's get started! 👇
+    """
+
+    await update.message.reply_text(introduction_text, parse_mode='Markdown')
 
 async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
