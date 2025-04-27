@@ -86,7 +86,7 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = f"💵 *{coin} Binance P2P (ETB)* for *{amount} ETB*\n\n"
     response += f"🔵 *Buy*: `{buy_info}`\n"
     response += f"🟠 *Sell*: `{sell_info}`\n\n"
-    response += "🔔 Powered by @YourUsername"
+    response += "🔔 Powered by @Yoniprof"
 
     keyboard = [
         [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh|{amount}|{coin}|{pay_type or 'none'}")]
