@@ -54,7 +54,7 @@ def fetch_p2p_price(trade_type, amount):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     payload = {
         "page": 1,
-        "rows": 25,  # Increase to fetch more offers
+        "rows": 21,  # Increase to fetch more offers
         "payTypes": [],
         "asset": "USDT",
         "fiat": "ETB",
