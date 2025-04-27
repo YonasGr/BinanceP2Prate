@@ -3,7 +3,7 @@ from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, InlineQueryHandler
 
 BOT_TOKEN = '7640687485:AAEh8tI6GhuJ9_MgYsjUIcCLQG-ILD9I3_Q'
-ADMIN_USER_ID = 123456789  # Replace this with your actual Telegram user ID
+ADMIN_USER_ID = 898505692  # Replace this with your actual Telegram user ID
 
 # Store user IDs who have started the bot
 user_ids = set()
