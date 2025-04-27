@@ -3,8 +3,13 @@ from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, InlineQueryHandler
 
 BOT_TOKEN = '7640687485:AAEh8tI6GhuJ9_MgYsjUIcCLQG-ILD9I3_Q'
+ADMIN_USER_ID = 123456789  # Replace this with your actual Telegram user ID
+
+# Store user IDs who have started the bot
+user_ids = set()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_ids.add(update.message.from_user.id)  # Add the user to the list of users
     introduction_text = """
     👋 *Welcome to the Binance P2P Price Bot!*
 
@@ -119,12 +124,52 @@ async def inline_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.inline_query.answer(results)
 
+# Admin panel command
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if the user is the admin
+    if update.message.from_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ You are not authorized to access the admin panel.")
+        return
+
+    # Generate stats and admin options
+    stats_text = f"📊 *Bot Stats:*\n"
+    stats_text += f"Total users who have interacted with the bot: {len(user_ids)}\n"
+
+    admin_text = """
+    🛠 *Admin Panel*:
+    - `/stats`: View bot statistics
+    - `/send_message [message]`: Send a message to all users
+    """
+
+    await update.message.reply_text(stats_text + admin_text, parse_mode='Markdown')
+
+# Send a message to all users
+async def send_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ You are not authorized to send messages to all users.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("⚠️ Please provide the message to send.\nExample: `/send_message Hello, this is an update!`")
+        return
+
+    message = ' '.join(context.args)
+    for user_id in user_ids:
+        try:
+            await context.bot.send_message(user_id, message)
+        except Exception as e:
+            print(f"Failed to send message to {user_id}: {e}")
+
+    await update.message.reply_text(f"✅ Message sent to {len(user_ids)} users.")
+
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Add handlers for /start, /price, and inline queries
+    # Add handlers for /start, /price, /admin, /send_message, and inline queries
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('price', get_price))
+    app.add_handler(CommandHandler('admin', admin))
+    app.add_handler(CommandHandler('send_message', send_message))
     app.add_handler(InlineQueryHandler(inline_price))
 
     print("Bot is running...")
