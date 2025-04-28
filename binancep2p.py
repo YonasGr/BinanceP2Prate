@@ -1,16 +1,23 @@
 import asyncio
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional
 import sqlite3
 import aiohttp
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
-    filters
+    filters,
+    InlineQueryHandler
 )
 
 BOT_TOKEN = '7640687485:AAEh8tI6GhuJ9_MgYsjUIcCLQG-ILD9I3_Q'
@@ -117,7 +124,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response += f"🔵 *Buy*: `{buy_info}`\n"
         response += f"🟠 *Sell*: `{sell_info}`\n\n"
         response += f"🕰 Updated at {datetime.now().strftime('%H:%M:%S')}\n\n"
-        response += "🔔 Powered by @YourUsername"
+        response += "🔔 Powered by @Yoniprof"
 
         await query.edit_message_text(response, parse_mode='Markdown', reply_markup=query.message.reply_markup)
     except Exception as e:
@@ -244,6 +251,13 @@ async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption="📊 User data export"
     )
 
+async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /price command in groups"""
+    if update.message.text.startswith('/price'):
+        # Extract command without the slash
+        await get_price(update, context)
+
+
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -256,6 +270,12 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('stats', admin_stats))
     app.add_handler(CommandHandler('broadcast', broadcast))
     app.add_handler(CommandHandler('export_users', export_users))
+
+        # Group handling
+    app.add_handler(MessageHandler(
+        filters.TEXT & (~filters.COMMAND) & filters.ChatType.GROUPS,
+        handle_group_messages
+    ))
 
     print("Bot is running...")
     app.run_polling()
