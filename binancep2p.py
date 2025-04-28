@@ -66,41 +66,102 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await track_user(update)
     args = context.args
     if len(args) < 1:
-        await update.message.reply_text("⚠️ Usage: `/price [amount] [coin] [payment_method]`", parse_mode='Markdown')
+        await update.message.reply_text("⚠️ Usage: `/price [amount] [currency/payment method] [coin]`", parse_mode='Markdown')
         return
-    
+
     try:
         amount = float(args[0])
-        if amount <= 0:
-            raise ValueError("Amount must be positive")
-    except ValueError as e:
-        await update.message.reply_text(f"⚠️ Invalid amount! {str(e)}", parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("⚠️ Amount must be a number!", parse_mode='Markdown')
         return
     
-    coin = args[1].upper() if len(args) > 1 else "USDT"
-    pay_type = args[2] if len(args) > 2 else None
+    if len(args) >= 2:
+        second_word = args[1].lower()
+    else:
+        second_word = "etb"
 
-    try:
+    # Default values
+    coin = "USDT"
+    pay_type = None
+    treating_as = "etb"  # or 'usdt'
+
+    if second_word == "etb":
+        treating_as = "etb"
+    elif second_word == "usdt":
+        treating_as = "usdt"
+    else:
+        # Maybe second word is payment method or coin
+        if second_word.upper() in ["BTC", "ETH", "BNB", "USDT"]:
+            coin = second_word.upper()
+        else:
+            pay_type = second_word
+
+    # Check if there’s a third argument
+    if len(args) >= 3:
+        third_word = args[2]
+        if third_word.upper() in ["BTC", "ETH", "BNB", "USDT"]:
+            coin = third_word.upper()
+        else:
+            pay_type = third_word
+
+    if treating_as == "etb":
+        # Amount is ETB, fetch by ETB limits
         buy_info = await fetch_p2p_price(trade_type="BUY", amount=amount, asset=coin, pay_type=pay_type)
         sell_info = await fetch_p2p_price(trade_type="SELL", amount=amount, asset=coin, pay_type=pay_type)
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Error fetching prices: {str(e)}", parse_mode='Markdown')
-        return
 
-    response = f"💵 *{coin} Binance P2P (ETB)* for *{amount} ETB*\n\n"
-    response += f"🔵 *Buy*: `{buy_info}`\n"
-    response += f"🟠 *Sell*: `{sell_info}`\n\n"
-    response += "🔔 Powered by @Yoniprof"
+        response = f"💵 *{coin} Binance P2P (ETB)* for *{amount} ETB*\n\n"
+        response += f"🔵 *Buy*: `{buy_info}`\n"
+        response += f"🟠 *Sell*: `{sell_info}`\n\n"
+        response += "🔔 Powered by @Yoniprof"
+    
+    else:
+        # Amount is USDT, need to calculate total ETB
+        buy_price = await fetch_first_price(trade_type="BUY", asset=coin, pay_type=pay_type)
+        sell_price = await fetch_first_price(trade_type="SELL", asset=coin, pay_type=pay_type)
+
+        if buy_price is None or sell_price is None:
+            await update.message.reply_text("⚠️ No offers available right now.", parse_mode='Markdown')
+            return
+
+        total_buy_etb = amount * float(buy_price)
+        total_sell_etb = amount * float(sell_price)
+
+        response = f"💵 *{amount} {coin}* Binance P2P Estimated in ETB\n\n"
+        response += f"🔵 *Buy*: {buy_price} ETB\n"
+        response += f"🟠 *Sell*: {sell_price} ETB\n\n"
+        response += f"💰 *Total to pay for {amount} {coin}*: {total_buy_etb:.2f} ETB\n"
+        response += f"💵 *Total to get if selling {amount} {coin}*: {total_sell_etb:.2f} ETB\n\n"
+        response += "🔔 Powered by @Yoniprof"
 
     keyboard = [
-        [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh|{amount}|{coin}|{pay_type or 'none'}")]
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh|{amount}|{coin}|{pay_type or 'none'}|{treating_as}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(response, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def fetch_first_price(trade_type, asset="USDT", pay_type=None):
+    url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+    payload = {
+        "page": 1,
+        "rows": 1,
+        "payTypes": [pay_type] if pay_type else [],
+        "asset": asset,
+        "fiat": "ETB",
+        "tradeType": trade_type
+    }
+    headers = {'Content-Type': 'application/json'}
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=5)
+        data = response.json()
+        offer = data['data'][0]
+        price = offer['adv']['price']
+        return price
+    except Exception as e:
+        return None
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_user(update)
