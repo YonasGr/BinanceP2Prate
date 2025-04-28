@@ -1,8 +1,9 @@
 import asyncio
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 import sqlite3
 import aiohttp
+import re
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -20,9 +21,12 @@ from telegram.ext import (
     InlineQueryHandler
 )
 
+# Configuration
 BOT_TOKEN = '7640687485:AAEh8tI6GhuJ9_MgYsjUIcCLQG-ILD9I3_Q'
-ADMIN_IDS = [898505692 ]  # Replace with your Telegram user ID
+ADMIN_IDS = [898505692]
 DATABASE_NAME = 'bot_users.db'
+FIAT_CURRENCIES = ['ETB', 'USD', 'EUR', 'GBP']
+CRYPTO_CURRENCIES = ['USDT', 'BTC', 'ETH', 'TON', 'BNB', 'SOL']
 
 # Initialize database
 def init_db():
@@ -37,245 +41,211 @@ def init_db():
             last_interaction TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS rates (
+            currency_pair TEXT PRIMARY KEY,
+            rate REAL,
+            last_updated TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
-async def track_user(update: Update):
-    user = update.effective_user
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO users 
-        (user_id, username, first_name, last_name, last_interaction) 
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user.id, user.username, user.first_name, user.last_name, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+# Rate Providers
+class RateProviders:
+    @staticmethod
+    async def get_binance_p2p_rate(fiat: str, crypto: str, trade_type: str, amount: float):
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+        payload = {
+            "page": 1,
+            "rows": 10,
+            "asset": crypto,
+            "fiat": fiat,
+            "tradeType": trade_type,
+            "transAmount": str(amount)
+        }
+        headers = {'Content-Type': 'application/json'}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await track_user(update)
-    await update.message.reply_text(
-        "👋 Welcome!\nUse:\n\n"
-        "/price [amount] [coin] [payment_method]\n"
-        "Example:\n"
-        "`/price 5000 USDT`\n"
-        "`/price 10000 BTC Telebirr`\n",
-        parse_mode='Markdown'
-    )
-
-async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await track_user(update)
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text("⚠️ Usage: `/price [amount] [coin] [payment_method]`", parse_mode='Markdown')
-        return
-    
-    try:
-        amount = float(args[0])
-        if amount <= 0:
-            raise ValueError("Amount must be positive")
-    except ValueError as e:
-        await update.message.reply_text(f"⚠️ Invalid amount! {str(e)}", parse_mode='Markdown')
-        return
-    
-    coin = args[1].upper() if len(args) > 1 else "USDT"
-    pay_type = args[2] if len(args) > 2 else None
-
-    try:
-        buy_info = await fetch_p2p_price(trade_type="BUY", amount=amount, asset=coin, pay_type=pay_type)
-        sell_info = await fetch_p2p_price(trade_type="SELL", amount=amount, asset=coin, pay_type=pay_type)
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Error fetching prices: {str(e)}", parse_mode='Markdown')
-        return
-
-    response = f"💵 *{coin} Binance P2P (ETB)* for *{amount} ETB*\n\n"
-    response += f"🔵 *Buy*: `{buy_info}`\n"
-    response += f"🟠 *Sell*: `{sell_info}`\n\n"
-    response += "🔔 Powered by @Yoniprof"
-
-    keyboard = [
-        [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh|{amount}|{coin}|{pay_type or 'none'}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(response, parse_mode='Markdown', reply_markup=reply_markup)
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await track_user(update)
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data.split('|')
-    if len(data) != 4:
-        await query.edit_message_text("⚠️ Invalid refresh request")
-        return
-
-    try:
-        amount = float(data[1])
-        coin = data[2]
-        pay_type = data[3] if data[3] != 'none' else None
-
-        buy_info = await fetch_p2p_price(trade_type="BUY", amount=amount, asset=coin, pay_type=pay_type)
-        sell_info = await fetch_p2p_price(trade_type="SELL", amount=amount, asset=coin, pay_type=pay_type)
-
-        response = f"💵 *{coin} Binance P2P (ETB)* for *{amount} ETB*\n\n"
-        response += f"🔵 *Buy*: `{buy_info}`\n"
-        response += f"🟠 *Sell*: `{sell_info}`\n\n"
-        response += f"🕰 Updated at {datetime.now().strftime('%H:%M:%S')}\n\n"
-        response += "🔔 Powered by @Yoniprof"
-
-        await query.edit_message_text(response, parse_mode='Markdown', reply_markup=query.message.reply_markup)
-    except Exception as e:
-        await query.edit_message_text(f"⚠️ Error refreshing data: {str(e)}")
-
-async def fetch_p2p_price(trade_type: str, amount: float, asset: str = "USDT", pay_type: Optional[str] = None) -> str:
-    url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-    payload = {
-        "page": 1,
-        "rows": 10,
-        "payTypes": [pay_type] if pay_type else [],
-        "asset": asset,
-        "fiat": "ETB",
-        "tradeType": trade_type
-    }
-    headers = {'Content-Type': 'application/json'}
-
-    try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=5) as response:
+            async with session.post(url, json=payload, headers=headers) as response:
                 data = await response.json()
-                
                 for offer in data.get('data', []):
                     try:
                         adv = offer.get('adv', {})
-                        min_limit = float(adv.get('minSingleTransAmount', 0))
-                        max_limit = float(adv.get('maxSingleTransAmount', float('inf')))
-                        if min_limit <= amount <= max_limit:
-                            price = adv.get('price', 'N/A')
-                            return f"{price} ETB (Limits: {min_limit} - {max_limit})"
+                        price = float(adv.get('price', 0))
+                        return price
                     except (ValueError, AttributeError):
                         continue
-                
-                return "❌ No matching offers found within your amount range."
-    except asyncio.TimeoutError:
-        return "⚠️ Request timeout. Please try again later."
+                return None
+
+    @staticmethod
+    async def get_crypto_rate(base: str, target: str):
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={base}{target}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return float(data['price'])
+                return None
+
+    @staticmethod
+    async def get_bank_rate(fiat_from: str, fiat_to: str):
+        # This would be replaced with actual bank API calls
+        # Mock rates for demonstration
+        rates = {
+            'USDETB': 56.5,
+            'EURETB': 61.2,
+            'GBPETB': 71.8
+        }
+        return rates.get(f"{fiat_from}{fiat_to}", None)
+
+# Command Handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🌟 Welcome to CryptoRateBot!\n\n"
+        "Available commands:\n"
+        "/rate [amount][currency] - Get exchange rates\n"
+        "/convert [amount][from] to [to] - Convert between currencies\n"
+        "/bankrate [from] [to] - Get bank exchange rates\n\n"
+        "Examples:\n"
+        "`/rate 5000 ETB`\n"
+        "`/rate 100 USDT`\n"
+        "`/convert 50 USD to ETB`\n"
+        "`/bankrate USD ETB`",
+        parse_mode='Markdown'
+    )
+
+async def handle_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = ' '.join(context.args) if context.args else ''
+        if not query:
+            raise ValueError("Please specify amount and currency")
+        
+        # Parse input (e.g., "5000 ETB" or "100 USDT")
+        match = re.match(r'^(\d+\.?\d*)\s*([a-zA-Z]+)?$', query)
+        if not match:
+            raise ValueError("Invalid format. Use: /rate [amount][currency]")
+        
+        amount = float(match.group(1))
+        currency = (match.group(2) or 'ETB').upper()
+        
+        if currency in FIAT_CURRENCIES:
+            # Fiat currency (get crypto rates)
+            usdt_price = await RateProviders.get_binance_p2p_rate(currency, 'USDT', 'BUY', amount)
+            btc_price = await RateProviders.get_crypto_rate('BTC', currency)
+            
+            response = f"💱 Exchange Rates for {amount} {currency}:\n\n"
+            response += f"🔹 USDT: {usdt_price:.2f} {currency}\n" if usdt_price else ""
+            response += f"🔹 BTC: {btc_price:.2f} {currency}\n" if btc_price else ""
+            
+        elif currency in CRYPTO_CURRENCIES:
+            # Crypto currency (get fiat rates)
+            usd_price = await RateProviders.get_crypto_rate(currency, 'USDT')
+            etb_price = await RateProviders.get_binance_p2p_rate('ETB', currency, 'SELL', amount)
+            
+            response = f"💱 Exchange Rates for {amount} {currency}:\n\n"
+            response += f"🔹 USD: {usd_price * amount:.2f}\n" if usd_price else ""
+            response += f"🔹 ETB: {etb_price * amount:.2f}\n" if etb_price else ""
+            
+        else:
+            raise ValueError(f"Unsupported currency: {currency}")
+        
+        response += "\n🔄 Last updated: " + datetime.now().strftime("%H:%M:%S")
+        await update.message.reply_text(response)
+        
     except Exception as e:
-        return f"⚠️ Error: {str(e)}"
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
-# Admin commands
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⚠️ You are not authorized to use this command.")
-        return
+async def handle_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = ' '.join(context.args) if context.args else ''
+        if not query:
+            raise ValueError("Please specify conversion parameters")
+        
+        # Parse input (e.g., "100 USD to ETB")
+        match = re.match(r'^(\d+\.?\d*)\s*([a-zA-Z]+)\s+to\s+([a-zA-Z]+)$', query, re.IGNORECASE)
+        if not match:
+            raise ValueError("Invalid format. Use: /convert [amount][from] to [to]")
+        
+        amount = float(match.group(1))
+        from_curr = match.group(2).upper()
+        to_curr = match.group(3).upper()
+        
+        # Determine conversion path
+        if from_curr in CRYPTO_CURRENCIES and to_curr in CRYPTO_CURRENCIES:
+            # Crypto to crypto
+            rate = await RateProviders.get_crypto_rate(from_curr, to_curr)
+            result = amount * rate
+        elif from_curr in FIAT_CURRENCIES and to_curr in FIAT_CURRENCIES:
+            # Fiat to fiat (bank rate)
+            rate = await RateProviders.get_bank_rate(from_curr, to_curr)
+            result = amount * rate
+        elif from_curr in CRYPTO_CURRENCIES and to_curr in FIAT_CURRENCIES:
+            # Crypto to fiat
+            if to_curr == 'ETB':
+                rate = await RateProviders.get_binance_p2p_rate(to_curr, from_curr, 'SELL', amount)
+                result = amount * rate
+            else:
+                usd_rate = await RateProviders.get_crypto_rate(from_curr, 'USDT')
+                result = amount * usd_rate
+        elif from_curr in FIAT_CURRENCIES and to_curr in CRYPTO_CURRENCIES:
+            # Fiat to crypto
+            if from_curr == 'ETB':
+                rate = await RateProviders.get_binance_p2p_rate(from_curr, to_curr, 'BUY', amount)
+                result = amount / rate
+            else:
+                usd_rate = await RateProviders.get_crypto_rate(to_curr, 'USDT')
+                result = amount / usd_rate
+        else:
+            raise ValueError("Unsupported currency pair")
+        
+        if not rate:
+            raise ValueError("Could not fetch conversion rate")
+            
+        response = (f"🔁 Conversion: {amount} {from_curr} = {result:.2f} {to_curr}\n"
+                   f"📊 Rate: 1 {from_curr} = {rate:.6f} {to_curr}\n"
+                   f"🔄 Last updated: {datetime.now().strftime('%H:%M:%S')}")
+        
+        await update.message.reply_text(response)
+        
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    
-    # Get total users
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    
-    # Get active users (last 30 days)
-    cursor.execute("SELECT COUNT(*) FROM users WHERE last_interaction > datetime('now', '-30 days')")
-    active_users = cursor.fetchone()[0]
-    
-    conn.close()
+async def handle_bank_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if len(context.args) != 2:
+            raise ValueError("Please specify two currencies (e.g., /bankrate USD ETB)")
+        
+        from_curr = context.args[0].upper()
+        to_curr = context.args[1].upper()
+        
+        if from_curr not in FIAT_CURRENCIES or to_curr not in FIAT_CURRENCIES:
+            raise ValueError("Bank rates only available for fiat currencies")
+        
+        rate = await RateProviders.get_bank_rate(from_curr, to_curr)
+        if not rate:
+            raise ValueError("Could not fetch bank rate")
+            
+        response = (f"🏦 Bank Exchange Rate:\n"
+                   f"1 {from_curr} = {rate:.2f} {to_curr}\n"
+                   f"🔄 Last updated: {datetime.now().strftime('%H:%M:%S')}")
+        
+        await update.message.reply_text(response)
+        
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
-    await update.message.reply_text(
-        f"📊 Bot Statistics:\n\n"
-        f"👥 Total users: {total_users}\n"
-        f"🟢 Active users (last 30 days): {active_users}\n\n"
-        f"Admin commands:\n"
-        f"/stats - Show bot statistics\n"
-        f"/broadcast - Send message to all users\n"
-        f"/export_users - Export user data as CSV"
-    )
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⚠️ You are not authorized to use this command.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: /broadcast <your message>")
-        return
-
-    message = " ".join(context.args)
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-    conn.close()
-
-    total = len(users)
-    success = 0
-    failed = 0
-
-    await update.message.reply_text(f"📢 Starting broadcast to {total} users...")
-
-    for user in users:
-        try:
-            await context.bot.send_message(chat_id=user[0], text=message)
-            success += 1
-        except Exception as e:
-            print(f"Failed to send to {user[0]}: {str(e)}")
-            failed += 1
-        await asyncio.sleep(0.1)  # Rate limiting
-
-    await update.message.reply_text(
-        f"📢 Broadcast completed:\n"
-        f"✅ Success: {success}\n"
-        f"❌ Failed: {failed}"
-    )
-
-async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⚠️ You are not authorized to use this command.")
-        return
-
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users")
-    users = cursor.fetchall()
-    conn.close()
-
-    csv_data = "user_id,username,first_name,last_name,last_interaction\n"
-    for user in users:
-        csv_data += f"{user[0]},{user[1] or ''},{user[2] or ''},{user[3] or ''},{user[4]}\n"
-
-    await update.message.reply_document(
-        document=bytes(csv_data, 'utf-8'),
-        filename="bot_users.csv",
-        caption="📊 User data export"
-    )
-
-async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /price command in groups"""
-    if update.message.text.startswith('/price'):
-        # Extract command without the slash
-        await get_price(update, context)
-
-
+# Main Application
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # User commands
+    # Command handlers
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('price', get_price))
-    app.add_handler(CallbackQueryHandler(button_handler))
-
-    # Admin commands
-    app.add_handler(CommandHandler('stats', admin_stats))
-    app.add_handler(CommandHandler('broadcast', broadcast))
-    app.add_handler(CommandHandler('export_users', export_users))
-
-        # Group handling
-    app.add_handler(MessageHandler(
-        filters.TEXT & (~filters.COMMAND) & filters.ChatType.GROUPS,
-        handle_group_messages
-    ))
+    app.add_handler(CommandHandler('rate', handle_rate))
+    app.add_handler(CommandHandler('convert', handle_convert))
+    app.add_handler(CommandHandler('bankrate', handle_bank_rate))
 
     print("Bot is running...")
     app.run_polling()
